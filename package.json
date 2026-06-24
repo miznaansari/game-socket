@@ -1,0 +1,18 @@
+{
+  "name": "game-socket",
+  "version": "1.0.0",
+  "description": "Socket.io server for 1v1 Battle Grid game",
+  "main": "socket-server.js",
+  "scripts": {
+    "start": "node socket-server.js",
+    "build": "npx prisma generate"
+  },
+  "dependencies": {
+    "@prisma/adapter-mariadb": "^5.0.0",
+    "@prisma/client": "^5.0.0",
+    "socket.io": "^4.7.0"
+  },
+  "devDependencies": {
+    "prisma": "^5.0.0"
+  }
+}

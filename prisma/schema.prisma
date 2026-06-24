@@ -1,0 +1,96 @@
+datasource db {
+  provider = "mysql"
+}
+
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "library"
+}
+
+model User {
+  id                  String         @id @default(uuid())
+  name                String?
+  email               String         @unique
+  password            String?        // encrypted hash for credentials login
+  isEmailVerified     Boolean        @default(false)
+  role                String         @default("USER") // USER, ADMIN
+  oneSignalPlayerId   String?        // stored client-side push subscription ID
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  sessions            UserSession[]
+  sentFriendships     Friendship[]   @relation("SentFriendships")
+  receivedFriendships Friendship[]   @relation("ReceivedFriendships")
+  
+  gamesAsPlayer1      Game[]         @relation("Player1")
+  gamesAsPlayer2      Game[]         @relation("Player2")
+  wonGames            Game[]         @relation("Winner")
+  chatMessagesSent    ChatMessage[]  @relation("Sender")
+}
+
+model UserSession {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  id        String   @id @default(uuid())
+  email     String
+  token     String   @unique
+  expiresAt DateTime
+}
+
+model Friendship {
+  id         String   @id @default(uuid())
+  senderId   String
+  receiverId String
+  status     String   @default("PENDING") // PENDING, ACCEPTED
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  sender     User     @relation("SentFriendships", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver   User     @relation("ReceivedFriendships", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, receiverId])
+}
+
+model Game {
+  id                 String        @id @default(uuid())
+  player1Id          String
+  player2Id          String
+  player1Selections  Json?         // Array of 5 indices selected by Player 1, e.g. [12, 15, 34, 45, 60]
+  player2Selections  Json?         // Array of 5 indices selected by Player 2
+  player1Guesses     Json?         // Array of indices Player 1 has guessed on Player 2's board
+  player2Guesses     Json?         // Array of indices Player 2 has guessed on Player 1's board
+  status             String        @default("SELECTING") // SELECTING, PLAYING, FINISHED
+  turn               String        // ID of the player whose turn it is
+  winnerId           String?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  player1            User          @relation("Player1", fields: [player1Id], references: [id], onDelete: Cascade)
+  player2            User          @relation("Player2", fields: [player2Id], references: [id], onDelete: Cascade)
+  winner             User?         @relation("Winner", fields: [winnerId], references: [id])
+  chatMessages       ChatMessage[]
+}
+
+model ChatMessage {
+  id        String   @id @default(uuid())
+  gameId    String
+  senderId  String
+  content   String
+  createdAt DateTime @default(now())
+
+  game      Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  sender    User     @relation("Sender", fields: [senderId], references: [id], onDelete: Cascade)
+}
+
+model Campaign {
+  id        String   @id @default(uuid())
+  title     String
+  message   String
+  sentAt    DateTime @default(now())
+}

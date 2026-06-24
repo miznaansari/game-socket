@@ -304,7 +304,7 @@ function broadcastStatusUpdate(userId, status) {
   io.emit("friend-status-changed", { userId, status });
 }
 
-const PORT = process.env.SOCKET_PORT || 3001;
+const PORT = process.env.SOCKET_PORT || process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`Socket.io Server running on port ${PORT}`);
 });
