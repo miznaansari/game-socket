@@ -314,6 +314,7 @@ io.on("connection", (socket) => {
           cellIndex,
           emoji: memoryGrid[cellIndex],
           firstCard: true,
+          flippedIndices: memoryFlipped,
         });
 
       } else if (memoryFlipped.length === 1) {
@@ -321,12 +322,20 @@ io.on("connection", (socket) => {
         const firstCardIndex = memoryFlipped[0];
         memoryFlipped = [firstCardIndex, cellIndex];
 
+        // Update database with second card flipped immediately so it's persisted during the delay
+        const updatedGame = await prisma.game.update({
+          where: { id: gameId },
+          data: { memoryFlipped },
+        });
+
         // Broadcast immediately so both players see the second card reveal
         io.to(roomName).emit("memory-card-flipped", {
+          game: updatedGame,
           userId,
           cellIndex,
           emoji: memoryGrid[cellIndex],
           firstCard: false,
+          flippedIndices: memoryFlipped,
         });
 
         // Check if matching emojis
@@ -334,63 +343,74 @@ io.on("connection", (socket) => {
         const emoji2 = memoryGrid[cellIndex];
         const isMatch = emoji1 === emoji2;
 
-        let nextTurn = game.turn;
-        let updatedMatched = [...memoryMatched];
-        let p1Score = game.player1Score;
-        let p2Score = game.player2Score;
-        let newStatus = game.status;
-        let winnerId = game.winnerId;
+        // Delay checking the result slightly so clients can see the card before it gets processed
+        setTimeout(async () => {
+          try {
+            // Re-fetch current game state to avoid stale data during the delay
+            const gameRefreshed = await prisma.game.findUnique({ where: { id: gameId } });
+            if (!gameRefreshed) return;
 
-        if (isMatch) {
-          updatedMatched.push(firstCardIndex, cellIndex);
-          if (game.player1Id === userId) {
-            p1Score += 1;
-          } else {
-            p2Score += 1;
-          }
+            let nextTurn = gameRefreshed.turn;
+            let updatedMatched = Array.isArray(gameRefreshed.memoryMatched)
+              ? gameRefreshed.memoryMatched
+              : JSON.parse(gameRefreshed.memoryMatched || "[]");
+            let p1Score = gameRefreshed.player1Score;
+            let p2Score = gameRefreshed.player2Score;
+            let newStatus = gameRefreshed.status;
+            let winnerId = gameRefreshed.winnerId;
 
-          // If matched, they KEEP their turn
-          
-          // Check win condition
-          if (updatedMatched.length === 30) {
-            newStatus = "FINISHED";
-            if (p1Score > p2Score) {
-              winnerId = game.player1Id;
-            } else if (p2Score > p1Score) {
-              winnerId = game.player2Id;
+            if (isMatch) {
+              if (!updatedMatched.includes(firstCardIndex)) {
+                updatedMatched.push(firstCardIndex, cellIndex);
+              }
+              if (gameRefreshed.player1Id === userId) {
+                p1Score += 1;
+              } else {
+                p2Score += 1;
+              }
+
+              // Check win condition
+              if (updatedMatched.length === 30) {
+                newStatus = "FINISHED";
+                if (p1Score > p2Score) {
+                  winnerId = gameRefreshed.player1Id;
+                } else if (p2Score > p1Score) {
+                  winnerId = gameRefreshed.player2Id;
+                } else {
+                  winnerId = null; // Tie
+                }
+              }
             } else {
-              winnerId = null; // Tie
+              // Switch turn
+              nextTurn = (gameRefreshed.player1Id === userId) ? gameRefreshed.player2Id : gameRefreshed.player1Id;
             }
+
+            // Update database to apply match results and reset flipped list
+            const finalUpdatedGame = await prisma.game.update({
+              where: { id: gameId },
+              data: {
+                memoryMatched: updatedMatched,
+                memoryFlipped: [], // Reset flipped list now
+                player1Score: p1Score,
+                player2Score: p2Score,
+                turn: nextTurn,
+                status: newStatus,
+                winnerId,
+              },
+            });
+
+            // Emit match result
+            io.to(roomName).emit("memory-match-result", {
+              game: finalUpdatedGame,
+              match: isMatch,
+              flippedIndices: [firstCardIndex, cellIndex],
+              scores: { p1: p1Score, p2: p2Score },
+              nextTurn,
+              isFinished: newStatus === "FINISHED",
+            });
+          } catch (err) {
+            console.error("Error processing memory match delay:", err);
           }
-        } else {
-          // Switch turn
-          nextTurn = (game.player1Id === userId) ? game.player2Id : game.player1Id;
-        }
-
-        // Update database
-        const updatedGame = await prisma.game.update({
-          where: { id: gameId },
-          data: {
-            memoryMatched: updatedMatched,
-            memoryFlipped: [], // Reset flipped list
-            player1Score: p1Score,
-            player2Score: p2Score,
-            turn: nextTurn,
-            status: newStatus,
-            winnerId,
-          },
-        });
-
-        // Delay emitting the match result slightly so clients can see the card before it gets processed
-        setTimeout(() => {
-          io.to(roomName).emit("memory-match-result", {
-            game: updatedGame,
-            match: isMatch,
-            flippedIndices: [firstCardIndex, cellIndex],
-            scores: { p1: p1Score, p2: p2Score },
-            nextTurn,
-            isFinished: newStatus === "FINISHED",
-          });
         }, 1200);
       }
     } catch (err) {
