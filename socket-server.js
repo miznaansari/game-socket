@@ -7,19 +7,26 @@ const path = require("path");
 
 let prisma;
 try {
-  const envPath = path.join(__dirname, ".env");
-  const envFile = fs.readFileSync(envPath, "utf8");
-  const envVars = {};
-  envFile.split("\n").forEach(line => {
-    const parts = line.split("=");
-    if (parts.length >= 2) {
-      envVars[parts[0].trim()] = parts.slice(1).join("=").trim().replace(/^"(.*)"$/, "$1");
-    }
-  });
+  let dbUrl = process.env.DATABASE_URL;
 
-  const dbUrl = envVars.DATABASE_URL;
+  // If DATABASE_URL is not in system env, try reading from local .env
   if (!dbUrl) {
-    throw new Error("DATABASE_URL missing in .env");
+    const envPath = path.join(__dirname, ".env");
+    if (fs.existsSync(envPath)) {
+      const envFile = fs.readFileSync(envPath, "utf8");
+      const envVars = {};
+      envFile.split("\n").forEach(line => {
+        const parts = line.split("=");
+        if (parts.length >= 2) {
+          envVars[parts[0].trim()] = parts.slice(1).join("=").trim().replace(/^"(.*)"$/, "$1");
+        }
+      });
+      dbUrl = envVars.DATABASE_URL;
+    }
+  }
+
+  if (!dbUrl) {
+    throw new Error("DATABASE_URL is not set in environment or .env file");
   }
 
   const parsedUrl = new URL(dbUrl);
@@ -34,7 +41,8 @@ try {
   prisma = new PrismaClient({ adapter });
   console.log("Prisma initialized successfully with MariaDB adapter in socket-server");
 } catch (err) {
-  console.error("Prisma MariaDB adapter initialization failed in socket-server, falling back:", err);
+  console.error("Prisma initialization failed in socket-server:", err);
+  // Fail-safe default (though it may error in Prisma 7 if adapter is required)
   prisma = new PrismaClient();
 }
 
