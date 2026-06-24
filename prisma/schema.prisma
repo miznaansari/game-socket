@@ -65,6 +65,12 @@ model Game {
   player2Selections  Json?         // Array of 5 indices selected by Player 2
   player1Guesses     Json?         // Array of indices Player 1 has guessed on Player 2's board
   player2Guesses     Json?         // Array of indices Player 2 has guessed on Player 1's board
+  mode               String        @default("BATTLE") // BATTLE, MEMORY
+  memoryGrid         Json?         // Shuffled array of 30 emojis for Memory Mode, e.g. ["😂", "🔥", "😂", ...]
+  memoryMatched      Json?         // Array of matched indices, e.g. [0, 2, 5, 12, ...]
+  memoryFlipped      Json?         // Array of currently flipped indices, e.g. [4, 7]
+  player1Score       Int           @default(0)
+  player2Score       Int           @default(0)
   status             String        @default("SELECTING") // SELECTING, PLAYING, FINISHED
   turn               String        // ID of the player whose turn it is
   winnerId           String?
