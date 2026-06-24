@@ -312,9 +312,14 @@ function broadcastStatusUpdate(userId, status) {
   io.emit("friend-status-changed", { userId, status });
 }
 
-const PORT = process.env.SOCKET_PORT || process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`Socket.io Server running on port ${PORT}`);
-});
+if (process.env.VERCEL) {
+  console.log("Running in Vercel Serverless environment. Exporting server handler.");
+  module.exports = server;
+} else {
+  const PORT = process.env.SOCKET_PORT || process.env.PORT || 3001;
+  server.listen(PORT, () => {
+    console.log(`Socket.io Server running on port ${PORT}`);
+  });
+}
 
 
