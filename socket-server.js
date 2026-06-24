@@ -9,19 +9,27 @@ let prisma;
 try {
   let dbUrl = process.env.DATABASE_URL;
 
-  // If DATABASE_URL is not in system env, try reading from local .env
+  // If DATABASE_URL is not in system env, try reading from local .env or parent .env
   if (!dbUrl) {
-    const envPath = path.join(__dirname, ".env");
-    if (fs.existsSync(envPath)) {
-      const envFile = fs.readFileSync(envPath, "utf8");
-      const envVars = {};
-      envFile.split("\n").forEach(line => {
-        const parts = line.split("=");
-        if (parts.length >= 2) {
-          envVars[parts[0].trim()] = parts.slice(1).join("=").trim().replace(/^"(.*)"$/, "$1");
+    const pathsToCheck = [
+      path.join(__dirname, ".env"),
+      path.join(__dirname, "..", ".env")
+    ];
+    for (const envPath of pathsToCheck) {
+      if (fs.existsSync(envPath)) {
+        const envFile = fs.readFileSync(envPath, "utf8");
+        const envVars = {};
+        envFile.split("\n").forEach(line => {
+          const parts = line.split("=");
+          if (parts.length >= 2) {
+            envVars[parts[0].trim()] = parts.slice(1).join("=").trim().replace(/^"(.*)"$/, "$1");
+          }
+        });
+        if (envVars.DATABASE_URL) {
+          dbUrl = envVars.DATABASE_URL;
+          break;
         }
-      });
-      dbUrl = envVars.DATABASE_URL;
+      }
     }
   }
 
