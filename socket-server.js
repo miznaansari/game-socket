@@ -506,44 +506,11 @@ io.on("connection", (socket) => {
       socketToUser.delete(socket.id);
     }
 
-    // Emit immediate disconnect event to room and check forfeit after 8 seconds
+    // Emit immediate disconnect event to room
     if (gameId && userId) {
       const roomName = `game:${gameId}`;
       io.to(roomName).emit("opponent-disconnected-event", { userId });
-
-      setTimeout(async () => {
-        try {
-          const roomName = `game:${gameId}`;
-          const socketsInRoom = await io.in(roomName).fetchSockets();
-          const isUserStillInRoom = socketsInRoom.some(s => s.userId === userId);
-
-          if (!isUserStillInRoom) {
-            const game = await prisma.game.findUnique({ where: { id: gameId } });
-            if (game && (game.status === "PLAYING" || game.status === "SELECTING")) {
-              const winnerId = game.player1Id === userId ? game.player2Id : game.player1Id;
-
-              const updatedGame = await prisma.game.update({
-                where: { id: gameId },
-                data: {
-                  status: "FINISHED",
-                  winnerId: winnerId,
-                },
-              });
-
-              // Broadcast update to trigger Victory screen on remaining player client
-              io.to(roomName).emit("game-updated", {
-                game: updatedGame,
-                event: "forfeit",
-                userId: winnerId,
-              });
-
-              console.log(`User ${userId} left the game. Winner declared: ${winnerId}`);
-            }
-          }
-        } catch (err) {
-          console.error("Error in game disconnect cleanup:", err);
-        }
-      }, 8000);
+      console.log(`User ${userId} disconnected from game ${gameId}. Keep-alive active.`);
     }
   });
 });
