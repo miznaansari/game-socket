@@ -38,7 +38,15 @@ try {
   prisma = new PrismaClient();
 }
 
-const server = http.createServer();
+const server = http.createServer((req, res) => {
+  if (req.url === "/health" || req.url === "/") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "OK", message: "Socket server is running" }));
+  } else {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Not Found");
+  }
+});
 const io = new Server(server, {
   cors: {
     origin: "*", // Allow all connections, or process.env.NEXT_PUBLIC_APP_URL
