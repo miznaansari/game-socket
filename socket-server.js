@@ -54,6 +54,9 @@ try {
   prisma = new PrismaClient();
 }
 
+// In-memory game cache to prevent database lookups for latency-critical operations
+const gameCache = new Map();
+
 const server = http.createServer((req, res) => {
   if (req.url === "/health" || req.url === "/") {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -118,6 +121,16 @@ io.on("connection", (socket) => {
     
     console.log(`Socket ${socket.id} (User: ${userId}) joined room ${roomName}`);
 
+    // Pre-cache game details to avoid database latency on gameplay actions
+    try {
+      const game = await prisma.game.findUnique({ where: { id: gameId } });
+      if (game) {
+        gameCache.set(gameId, game);
+      }
+    } catch (err) {
+      console.error("Error caching game on join-game:", err);
+    }
+
     // Send a message indicating user joined
     io.to(roomName).emit("user-joined-room", { userId });
   });
@@ -129,8 +142,13 @@ io.on("connection", (socket) => {
     const roomName = `game:${gameId}`;
 
     try {
-      const game = await prisma.game.findUnique({ where: { id: gameId } });
-      if (!game || game.status !== "SELECTING") return;
+      let game = gameCache.get(gameId);
+      if (!game) {
+        game = await prisma.game.findUnique({ where: { id: gameId } });
+        if (!game) return;
+        gameCache.set(gameId, game);
+      }
+      if (game.status !== "SELECTING") return;
 
       let updateData = {};
       if (game.player1Id === userId) {
@@ -162,6 +180,7 @@ io.on("connection", (socket) => {
           turn,
         },
       });
+      gameCache.set(gameId, updatedGame);
 
       io.to(roomName).emit("game-updated", {
         game: updatedGame,
@@ -181,8 +200,13 @@ io.on("connection", (socket) => {
     const roomName = `game:${gameId}`;
 
     try {
-      const game = await prisma.game.findUnique({ where: { id: gameId } });
-      if (!game || game.status !== "PLAYING") return;
+      let game = gameCache.get(gameId);
+      if (!game) {
+        game = await prisma.game.findUnique({ where: { id: gameId } });
+        if (!game) return;
+        gameCache.set(gameId, game);
+      }
+      if (game.status !== "PLAYING") return;
       if (game.turn !== userId) {
         console.log(`Guess rejected: It is not user ${userId}'s turn.`);
         return; // Not user's turn
@@ -240,6 +264,7 @@ io.on("connection", (socket) => {
         where: { id: gameId },
         data: updateData,
       });
+      gameCache.set(gameId, updatedGame);
 
       // Broadcast result
       io.to(roomName).emit("guess-result", {
@@ -265,13 +290,16 @@ io.on("connection", (socket) => {
       console.log("[SOCKET] flip-memory-card: Missing parameters");
       return;
     }
-    const roomName = `game:${gameId}`;
-
     try {
-      const game = await prisma.game.findUnique({ where: { id: gameId } });
+      const roomName = `game:${gameId}`;
+      let game = gameCache.get(gameId);
       if (!game) {
-        console.log(`[SOCKET] flip-memory-card: Game ${gameId} not found`);
-        return;
+        game = await prisma.game.findUnique({ where: { id: gameId } });
+        if (!game) {
+          console.log(`[SOCKET] flip-memory-card: Game ${gameId} not found`);
+          return;
+        }
+        gameCache.set(gameId, game);
       }
       if (game.status !== "PLAYING") {
         console.log(`[SOCKET] flip-memory-card: Game status is not PLAYING (current: ${game.status})`);
