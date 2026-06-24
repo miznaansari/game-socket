@@ -301,13 +301,13 @@ io.on("connection", (socket) => {
         // First card flipped
         memoryFlipped = [cellIndex];
         
-        // Update database
-        const updatedGame = await prisma.game.update({
-          where: { id: gameId },
-          data: { memoryFlipped },
-        });
+        // Construct updated game representation in-memory
+        const updatedGame = {
+          ...game,
+          memoryFlipped,
+        };
 
-        // Broadcast to players
+        // Broadcast to players instantly
         io.to(roomName).emit("memory-card-flipped", {
           game: updatedGame,
           userId,
@@ -317,18 +317,24 @@ io.on("connection", (socket) => {
           flippedIndices: memoryFlipped,
         });
 
+        // Update database asynchronously in the background
+        prisma.game.update({
+          where: { id: gameId },
+          data: { memoryFlipped },
+        }).catch(err => console.error("Error updating first flip in DB:", err));
+
       } else if (memoryFlipped.length === 1) {
         // Second card flipped
         const firstCardIndex = memoryFlipped[0];
         memoryFlipped = [firstCardIndex, cellIndex];
 
-        // Update database with second card flipped immediately so it's persisted during the delay
-        const updatedGame = await prisma.game.update({
-          where: { id: gameId },
-          data: { memoryFlipped },
-        });
+        // Construct updated game representation in-memory
+        const updatedGame = {
+          ...game,
+          memoryFlipped,
+        };
 
-        // Broadcast immediately so both players see the second card reveal
+        // Broadcast immediately so both players see the second card reveal instantly
         io.to(roomName).emit("memory-card-flipped", {
           game: updatedGame,
           userId,
@@ -337,6 +343,12 @@ io.on("connection", (socket) => {
           firstCard: false,
           flippedIndices: memoryFlipped,
         });
+
+        // Update database asynchronously in the background
+        prisma.game.update({
+          where: { id: gameId },
+          data: { memoryFlipped },
+        }).catch(err => console.error("Error updating second flip in DB:", err));
 
         // Check if matching emojis
         const emoji1 = memoryGrid[firstCardIndex];
