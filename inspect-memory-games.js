@@ -38,11 +38,10 @@ try {
 }
 
 async function main() {
-  const games = await prisma.game.findMany({
-    where: { mode: "MEMORY" },
-    take: 5,
+  const game = await prisma.game.findUnique({
+    where: { id: "a0d8906c-ce4e-4d56-9b2d-a7ff143115df" },
   });
-  console.log("MEMORY GAMES IN DB:", JSON.stringify(games, null, 2));
+  console.log("GAME DETAILS:", JSON.stringify(game, null, 2));
 }
 
 main()
