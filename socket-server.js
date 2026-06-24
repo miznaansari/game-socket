@@ -498,8 +498,11 @@ io.on("connection", (socket) => {
       socketToUser.delete(socket.id);
     }
 
-    // Declaring default win on opponent disconnect after 8 seconds grace period
+    // Emit immediate disconnect event to room and check forfeit after 8 seconds
     if (gameId && userId) {
+      const roomName = `game:${gameId}`;
+      io.to(roomName).emit("opponent-disconnected-event", { userId });
+
       setTimeout(async () => {
         try {
           const roomName = `game:${gameId}`;
