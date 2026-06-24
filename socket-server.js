@@ -116,6 +116,14 @@ io.on("connection", (socket) => {
     socket.gameId = gameId;
     socket.userId = userId;
 
+    // Track online user registry for offline notification triggers
+    socketToUser.set(socket.id, userId);
+    if (!onlineUsers.has(userId)) {
+      onlineUsers.set(userId, new Set());
+    }
+    onlineUsers.get(userId).add(socket.id);
+    broadcastStatusUpdate(userId, "online");
+
     console.log(`Socket ${socket.id} (User: ${userId}) joined room ${roomName}`);
 
     // Send a message indicating user joined
@@ -481,9 +489,9 @@ io.on("connection", (socket) => {
 
   // Handle disconnect
   socket.on("disconnect", () => {
-    const userId = socketToUser.get(socket.id);
+    const userId = socketToUser.get(socket.id) || socket.userId;
     const gameId = socket.gameId;
-    console.log(`Socket disconnected: ${socket.id}`);
+    console.log(`Socket disconnected: ${socket.id}, User: ${userId}`);
 
     if (userId) {
       const userSockets = onlineUsers.get(userId);
