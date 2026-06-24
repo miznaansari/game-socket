@@ -103,6 +103,11 @@ io.on("connection", (socket) => {
 
     const roomName = `game:${gameId}`;
     socket.join(roomName);
+    
+    // Store current game and user data directly on the socket
+    socket.gameId = gameId;
+    socket.userId = userId;
+    
     console.log(`Socket ${socket.id} (User: ${userId}) joined room ${roomName}`);
 
     // Send a message indicating user joined
@@ -245,6 +250,146 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Memory Game card flipping
+  socket.on("flip-memory-card", async ({ gameId, userId, cellIndex }) => {
+    console.log(`[SOCKET] flip-memory-card event: gameId=${gameId}, userId=${userId}, cellIndex=${cellIndex}`);
+    if (!gameId || !userId || cellIndex === undefined) {
+      console.log("[SOCKET] flip-memory-card: Missing parameters");
+      return;
+    }
+    const roomName = `game:${gameId}`;
+
+    try {
+      const game = await prisma.game.findUnique({ where: { id: gameId } });
+      if (!game) {
+        console.log(`[SOCKET] flip-memory-card: Game ${gameId} not found`);
+        return;
+      }
+      if (game.status !== "PLAYING") {
+        console.log(`[SOCKET] flip-memory-card: Game status is not PLAYING (current: ${game.status})`);
+        return;
+      }
+      if (game.mode !== "MEMORY") {
+        console.log(`[SOCKET] flip-memory-card: Game mode is not MEMORY (current: ${game.mode})`);
+        return;
+      }
+      if (game.turn !== userId) {
+        console.log(`[SOCKET] flip-memory-card rejected: Not user ${userId}'s turn (current turn: ${game.turn})`);
+        return;
+      }
+
+      // Parse fields
+      const memoryGrid = Array.isArray(game.memoryGrid) ? game.memoryGrid : JSON.parse(game.memoryGrid || "[]");
+      const memoryMatched = Array.isArray(game.memoryMatched) ? game.memoryMatched : JSON.parse(game.memoryMatched || "[]");
+      let memoryFlipped = Array.isArray(game.memoryFlipped) ? game.memoryFlipped : JSON.parse(game.memoryFlipped || "[]");
+
+      // Verify cell is valid and not already flipped or matched
+      if (cellIndex < 0 || cellIndex >= 30) return;
+      if (memoryMatched.includes(cellIndex)) return;
+      if (memoryFlipped.includes(cellIndex)) return;
+
+      // Handle card flipping
+      if (memoryFlipped.length === 0) {
+        // First card flipped
+        memoryFlipped = [cellIndex];
+        
+        // Update database
+        const updatedGame = await prisma.game.update({
+          where: { id: gameId },
+          data: { memoryFlipped },
+        });
+
+        // Broadcast to players
+        io.to(roomName).emit("memory-card-flipped", {
+          game: updatedGame,
+          userId,
+          cellIndex,
+          emoji: memoryGrid[cellIndex],
+          firstCard: true,
+        });
+
+      } else if (memoryFlipped.length === 1) {
+        // Second card flipped
+        const firstCardIndex = memoryFlipped[0];
+        memoryFlipped = [firstCardIndex, cellIndex];
+
+        // Broadcast immediately so both players see the second card reveal
+        io.to(roomName).emit("memory-card-flipped", {
+          userId,
+          cellIndex,
+          emoji: memoryGrid[cellIndex],
+          firstCard: false,
+        });
+
+        // Check if matching emojis
+        const emoji1 = memoryGrid[firstCardIndex];
+        const emoji2 = memoryGrid[cellIndex];
+        const isMatch = emoji1 === emoji2;
+
+        let nextTurn = game.turn;
+        let updatedMatched = [...memoryMatched];
+        let p1Score = game.player1Score;
+        let p2Score = game.player2Score;
+        let newStatus = game.status;
+        let winnerId = game.winnerId;
+
+        if (isMatch) {
+          updatedMatched.push(firstCardIndex, cellIndex);
+          if (game.player1Id === userId) {
+            p1Score += 1;
+          } else {
+            p2Score += 1;
+          }
+
+          // If matched, they KEEP their turn
+          
+          // Check win condition
+          if (updatedMatched.length === 30) {
+            newStatus = "FINISHED";
+            if (p1Score > p2Score) {
+              winnerId = game.player1Id;
+            } else if (p2Score > p1Score) {
+              winnerId = game.player2Id;
+            } else {
+              winnerId = null; // Tie
+            }
+          }
+        } else {
+          // Switch turn
+          nextTurn = (game.player1Id === userId) ? game.player2Id : game.player1Id;
+        }
+
+        // Update database
+        const updatedGame = await prisma.game.update({
+          where: { id: gameId },
+          data: {
+            memoryMatched: updatedMatched,
+            memoryFlipped: [], // Reset flipped list
+            player1Score: p1Score,
+            player2Score: p2Score,
+            turn: nextTurn,
+            status: newStatus,
+            winnerId,
+          },
+        });
+
+        // Delay emitting the match result slightly so clients can see the card before it gets processed
+        setTimeout(() => {
+          io.to(roomName).emit("memory-match-result", {
+            game: updatedGame,
+            match: isMatch,
+            flippedIndices: [firstCardIndex, cellIndex],
+            scores: { p1: p1Score, p2: p2Score },
+            nextTurn,
+            isFinished: newStatus === "FINISHED",
+          });
+        }, 1200);
+      }
+    } catch (err) {
+      console.error("Error in flip-memory-card:", err);
+    }
+  });
+
   // Sending flying emojis
   socket.on("send-emoji", ({ gameId, userId, emoji }) => {
     if (!gameId || !userId || !emoji) return;
@@ -278,7 +423,7 @@ io.on("connection", (socket) => {
   });
 
   // Live 1v1 invite notification (if opponent is online)
-  socket.on("send-invite", ({ senderId, senderName, receiverId, gameId }) => {
+  socket.on("send-invite", ({ senderId, senderName, receiverId, gameId, mode }) => {
     if (!senderId || !receiverId || !gameId) return;
 
     if (onlineUsers.has(receiverId)) {
@@ -287,15 +432,17 @@ io.on("connection", (socket) => {
           senderId,
           senderName,
           gameId,
+          mode: mode || "BATTLE",
         });
       });
-      console.log(`Live invite sent to User ${receiverId} from ${senderId}`);
+      console.log(`Live invite sent to User ${receiverId} from ${senderId} for mode ${mode}`);
     }
   });
 
   // Handle disconnect
   socket.on("disconnect", () => {
     const userId = socketToUser.get(socket.id);
+    const gameId = socket.gameId;
     console.log(`Socket disconnected: ${socket.id}`);
 
     if (userId) {
@@ -309,6 +456,43 @@ io.on("connection", (socket) => {
         }
       }
       socketToUser.delete(socket.id);
+    }
+
+    // Declaring default win on opponent disconnect after 8 seconds grace period
+    if (gameId && userId) {
+      setTimeout(async () => {
+        try {
+          const roomName = `game:${gameId}`;
+          const socketsInRoom = await io.in(roomName).fetchSockets();
+          const isUserStillInRoom = socketsInRoom.some(s => s.userId === userId);
+          
+          if (!isUserStillInRoom) {
+            const game = await prisma.game.findUnique({ where: { id: gameId } });
+            if (game && (game.status === "PLAYING" || game.status === "SELECTING")) {
+              const winnerId = game.player1Id === userId ? game.player2Id : game.player1Id;
+              
+              const updatedGame = await prisma.game.update({
+                where: { id: gameId },
+                data: {
+                  status: "FINISHED",
+                  winnerId: winnerId,
+                },
+              });
+              
+              // Broadcast update to trigger Victory screen on remaining player client
+              io.to(roomName).emit("game-updated", {
+                game: updatedGame,
+                event: "forfeit",
+                userId: winnerId,
+              });
+              
+              console.log(`User ${userId} left the game. Winner declared: ${winnerId}`);
+            }
+          }
+        } catch (err) {
+          console.error("Error in game disconnect cleanup:", err);
+        }
+      }, 8000);
     }
   });
 });
