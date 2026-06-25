@@ -116,7 +116,7 @@ async function sendPushNotification({ playerId, externalId, title, message, url 
       payload.included_segments = ["All"];
     }
 
-    const response = await fetch("https://onesignal.com/api/v1/notifications", {
+    let response = await fetch("https://onesignal.com/api/v1/notifications", {
       method: "POST",
       headers: {
         "Content-Type": "application/json; charset=utf-8",
@@ -125,9 +125,37 @@ async function sendPushNotification({ playerId, externalId, title, message, url 
       body: JSON.stringify(payload),
     });
 
-    const data = await response.json();
+    let data = await response.json();
+
+    // If external_id alias targeting fails (e.g. user hasn't completed client handshake),
+    // immediately retry targeting via database-stored subscription ID (playerId).
+    if (externalId && playerId && data.errors && (data.errors.invalid_aliases || (Array.isArray(data.errors) && data.errors.some(e => e.includes("alias"))))) {
+      console.warn(`OneSignal external_id alias targeting failed for ${externalId}. Retrying with subscription ID (playerId): ${playerId}`);
+
+      const fallbackPayload = {
+        app_id: appId,
+        contents: { en: message },
+        headings: { en: title },
+        include_subscription_ids: [playerId]
+      };
+      if (url) {
+        const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+        fallbackPayload.url = `${baseUrl}${url}`;
+      }
+
+      response = await fetch("https://onesignal.com/api/v1/notifications", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          Authorization: `Basic ${apiKey}`,
+        },
+        body: JSON.stringify(fallbackPayload),
+      });
+      data = await response.json();
+    }
+
     if (!response.ok) {
-      throw new Error(data.errors ? data.errors.join(", ") : "OneSignal error");
+      throw new Error(data.errors ? (typeof data.errors === 'object' ? JSON.stringify(data.errors) : data.errors.join(", ")) : "OneSignal error");
     }
     console.log("OneSignal push notification sent successfully from socket server:", data);
   } catch (error) {
