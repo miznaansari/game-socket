@@ -7,32 +7,30 @@ const path = require("path");
 
 let prisma;
 try {
-  let dbUrl = process.env.DATABASE_URL;
-
-  // If DATABASE_URL is not in system env, try reading from local .env or parent .env
-  if (!dbUrl) {
-    const pathsToCheck = [
-      path.join(__dirname, ".env"),
-      path.join(__dirname, "..", ".env")
-    ];
-    for (const envPath of pathsToCheck) {
-      if (fs.existsSync(envPath)) {
-        const envFile = fs.readFileSync(envPath, "utf8");
-        const envVars = {};
-        envFile.split("\n").forEach(line => {
-          const parts = line.split("=");
-          if (parts.length >= 2) {
-            envVars[parts[0].trim()] = parts.slice(1).join("=").trim().replace(/^"(.*)"$/, "$1");
+  // Load environment variables from .env files into process.env if not already set
+  const pathsToCheck = [
+    path.join(__dirname, ".env"),
+    path.join(__dirname, "..", ".env")
+  ];
+  for (const envPath of pathsToCheck) {
+    if (fs.existsSync(envPath)) {
+      const envFile = fs.readFileSync(envPath, "utf8");
+      envFile.split("\n").forEach(line => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) return;
+        const parts = trimmed.split("=");
+        if (parts.length >= 2) {
+          const key = parts[0].trim();
+          const val = parts.slice(1).join("=").trim().replace(/^"(.*)"$/, "$1").replace(/^'(.*)'$/, "$1");
+          if (key && !process.env[key]) {
+            process.env[key] = val;
           }
-        });
-        if (envVars.DATABASE_URL) {
-          dbUrl = envVars.DATABASE_URL;
-          break;
         }
-      }
+      });
     }
   }
 
+  let dbUrl = process.env.DATABASE_URL;
   if (!dbUrl) {
     throw new Error("DATABASE_URL is not set in environment or .env file");
   }
@@ -77,6 +75,65 @@ const io = new Server(server, {
     methods: ["GET", "POST"],
   },
 });
+
+// Helper to send a OneSignal push notification
+async function sendPushNotification({ playerId, externalId, title, message, url }) {
+  const appId = process.env.NEXT_PUBLIC_ONESIGNAL_APP_ID || "89ccfa0f-7840-4f33-9284-e9d0e44865a9";
+  const apiKey = process.env.ONESIGNAL_REST_API_KEY;
+
+  console.log("----------------------------------------");
+  console.log("[SOCKET ONESIGNAL PUSH NOTIFICATION TRIGGERED]");
+  console.log(`To External ID: ${externalId || "—"}`);
+  console.log(`To Subscription ID: ${playerId || "—"}`);
+  console.log(`Title: ${title}`);
+  console.log(`Message: ${message}`);
+  console.log(`URL Path: ${url}`);
+  console.log("----------------------------------------");
+
+  if (!apiKey || apiKey === "your-onesignal-rest-api-key-here") {
+    console.warn("OneSignal push skipped: ONESIGNAL_REST_API_KEY not configured");
+    return;
+  }
+
+  try {
+    const payload = {
+      app_id: appId,
+      contents: { en: message },
+      headings: { en: title },
+    };
+
+    if (url) {
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+      payload.url = `${baseUrl}${url}`;
+    }
+
+    if (externalId) {
+      payload.include_aliases = { external_id: [externalId] };
+      payload.target_channel = "push";
+    } else if (playerId) {
+      payload.include_subscription_ids = [playerId];
+    } else {
+      payload.included_segments = ["All"];
+    }
+
+    const response = await fetch("https://onesignal.com/api/v1/notifications", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Authorization: `Basic ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.errors ? data.errors.join(", ") : "OneSignal error");
+    }
+    console.log("OneSignal push notification sent successfully from socket server:", data);
+  } catch (error) {
+    console.error("OneSignal push notification from socket server failed:", error.message);
+  }
+}
 
 // Map of userId -> Set of socketIds
 const onlineUsers = new Map();
@@ -447,10 +504,41 @@ io.on("connection", (socket) => {
   });
 
   // Sending flying emojis
-  socket.on("send-emoji", ({ gameId, userId, emoji }) => {
+  socket.on("send-emoji", async ({ gameId, userId, emoji }) => {
     if (!gameId || !userId || !emoji) return;
     const roomName = `game:${gameId}`;
     io.to(roomName).emit("emoji-received", { userId, emoji });
+
+    try {
+      const game = await prisma.game.findUnique({
+        where: { id: gameId },
+        select: {
+          player1Id: true,
+          player2Id: true,
+          player1: { select: { id: true, name: true, email: true, oneSignalPlayerId: true } },
+          player2: { select: { id: true, name: true, email: true, oneSignalPlayerId: true } },
+        }
+      });
+
+      if (game) {
+        const sender = game.player1Id === userId ? game.player1 : game.player2;
+        const opponent = game.player1Id === userId ? game.player2 : game.player1;
+        const isOnline = onlineUsers.has(opponent.id) && onlineUsers.get(opponent.id).size > 0;
+
+        if (!isOnline) {
+          const senderName = sender.name || sender.email.split("@")[0];
+          await sendPushNotification({
+            externalId: opponent.id,
+            playerId: opponent.oneSignalPlayerId,
+            title: `${senderName} reacted! ${emoji}`,
+            message: `${senderName} sent you a ${emoji} in your match!`,
+            url: `/game/${gameId}`,
+          });
+        }
+      }
+    } catch (err) {
+      console.error("Error sending emoji push notification:", err);
+    }
   });
 
   // Sending game chat message
@@ -473,8 +561,35 @@ io.on("connection", (socket) => {
       });
 
       io.to(roomName).emit("chat-received", message);
+
+      const game = await prisma.game.findUnique({
+        where: { id: gameId },
+        select: {
+          player1Id: true,
+          player2Id: true,
+          player1: { select: { id: true, name: true, email: true, oneSignalPlayerId: true } },
+          player2: { select: { id: true, name: true, email: true, oneSignalPlayerId: true } },
+        }
+      });
+
+      if (game) {
+        const sender = game.player1Id === userId ? game.player1 : game.player2;
+        const opponent = game.player1Id === userId ? game.player2 : game.player1;
+        const isOnline = onlineUsers.has(opponent.id) && onlineUsers.get(opponent.id).size > 0;
+
+        if (!isOnline) {
+          const senderName = sender.name || sender.email.split("@")[0];
+          await sendPushNotification({
+            externalId: opponent.id,
+            playerId: opponent.oneSignalPlayerId,
+            title: `New message from ${senderName} 💬`,
+            message: content,
+            url: `/game/${gameId}`,
+          });
+        }
+      }
     } catch (err) {
-      console.error("Error saving chat:", err);
+      console.error("Error saving chat or sending chat push notification:", err);
     }
   });
 
