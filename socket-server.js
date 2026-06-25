@@ -55,9 +55,17 @@ try {
 }
 
 const server = http.createServer((req, res) => {
-  if (req.url === "/health" || req.url === "/") {
+  const parsedUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  const pathname = parsedUrl.pathname;
+
+  if (pathname === "/health" || pathname === "/") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "OK", message: "Socket server is running" }));
+  } else if (pathname === "/is-online") {
+    const userId = parsedUrl.searchParams.get("userId");
+    const isOnline = onlineUsers.has(userId) && onlineUsers.get(userId).size > 0;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ online: isOnline }));
   } else {
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("Not Found");
