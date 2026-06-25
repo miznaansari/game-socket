@@ -52,7 +52,14 @@ try {
   prisma = new PrismaClient();
 }
 
-const server = http.createServer((req, res) => {
+// Reset all users' isOnline status to false on server startup to clear stale records
+prisma.user.updateMany({
+  data: { isOnline: false }
+})
+.then(result => console.log(`Cleared stale user online statuses. Reset count: ${result.count}`))
+.catch(err => console.error("Failed to reset stale online statuses on startup:", err));
+
+const server = http.createServer(async (req, res) => {
   const parsedUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const pathname = parsedUrl.pathname;
 
@@ -61,9 +68,21 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ status: "OK", message: "Socket server is running" }));
   } else if (pathname === "/is-online") {
     const userId = parsedUrl.searchParams.get("userId");
-    const isOnline = onlineUsers.has(userId) && onlineUsers.get(userId).size > 0;
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ online: isOnline }));
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: userId || "" },
+        select: { isOnline: true }
+      });
+      const isOnline = user ? user.isOnline : false;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ online: isOnline }));
+    } catch (err) {
+      console.error("Error in /is-online DB check:", err);
+      // Fallback to in-memory check if DB fails
+      const isOnline = onlineUsers.has(userId) && onlineUsers.get(userId).size > 0;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ online: isOnline }));
+    }
   } else {
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("Not Found");
@@ -184,6 +203,12 @@ io.on("connection", (socket) => {
 
     console.log(`User ${userId} is online. Sockets:`, onlineUsers.get(userId).size);
 
+    // Update database status to online
+    prisma.user.update({
+      where: { id: userId },
+      data: { isOnline: true },
+    }).catch(err => console.error(`Failed to update DB isOnline to true for user ${userId}:`, err));
+
     // Broadcast status to friends
     broadcastStatusUpdate(userId, "online");
   });
@@ -215,6 +240,13 @@ io.on("connection", (socket) => {
       onlineUsers.set(userId, new Set());
     }
     onlineUsers.get(userId).add(socket.id);
+
+    // Update database status to online
+    prisma.user.update({
+      where: { id: userId },
+      data: { isOnline: true },
+    }).catch(err => console.error(`Failed to update DB isOnline to true for user ${userId} in join-game:`, err));
+
     broadcastStatusUpdate(userId, "online");
 
     console.log(`Socket ${socket.id} (User: ${userId}) joined room ${roomName}`);
@@ -543,15 +575,17 @@ io.on("connection", (socket) => {
         select: {
           player1Id: true,
           player2Id: true,
-          player1: { select: { id: true, name: true, email: true, oneSignalPlayerId: true } },
-          player2: { select: { id: true, name: true, email: true, oneSignalPlayerId: true } },
+          player1: { select: { id: true, name: true, email: true, isOnline: true, oneSignalPlayerId: true } },
+          player2: { select: { id: true, name: true, email: true, isOnline: true, oneSignalPlayerId: true } },
         }
       });
 
       if (game) {
         const sender = game.player1Id === userId ? game.player1 : game.player2;
         const opponent = game.player1Id === userId ? game.player2 : game.player1;
-        const isOnline = onlineUsers.has(opponent.id) && onlineUsers.get(opponent.id).size > 0;
+        
+        // 100% online confirm: must be online in DB and have active socket connection
+        const isOnline = opponent.isOnline && onlineUsers.has(opponent.id) && onlineUsers.get(opponent.id).size > 0;
 
         if (!isOnline) {
           const senderName = sender.name || sender.email.split("@")[0];
@@ -595,15 +629,17 @@ io.on("connection", (socket) => {
         select: {
           player1Id: true,
           player2Id: true,
-          player1: { select: { id: true, name: true, email: true, oneSignalPlayerId: true } },
-          player2: { select: { id: true, name: true, email: true, oneSignalPlayerId: true } },
+          player1: { select: { id: true, name: true, email: true, isOnline: true, oneSignalPlayerId: true } },
+          player2: { select: { id: true, name: true, email: true, isOnline: true, oneSignalPlayerId: true } },
         }
       });
 
       if (game) {
         const sender = game.player1Id === userId ? game.player1 : game.player2;
         const opponent = game.player1Id === userId ? game.player2 : game.player1;
-        const isOnline = onlineUsers.has(opponent.id) && onlineUsers.get(opponent.id).size > 0;
+        
+        // 100% online confirm: must be online in DB and have active socket connection
+        const isOnline = opponent.isOnline && onlineUsers.has(opponent.id) && onlineUsers.get(opponent.id).size > 0;
 
         if (!isOnline) {
           const senderName = sender.name || sender.email.split("@")[0];
@@ -651,6 +687,13 @@ io.on("connection", (socket) => {
         if (userSockets.size === 0) {
           onlineUsers.delete(userId);
           console.log(`User ${userId} has gone completely offline.`);
+
+          // Update database status to offline
+          prisma.user.update({
+            where: { id: userId },
+            data: { isOnline: false },
+          }).catch(err => console.error(`Failed to update DB isOnline to false for user ${userId}:`, err));
+
           broadcastStatusUpdate(userId, "offline");
         }
       }
