@@ -186,9 +186,65 @@ async function sendPushNotification({ playerId, externalId, title, message, url 
 const onlineUsers = new Map();
 // Map of socketId -> userId
 const socketToUser = new Map();
+// Map of userId -> last ping timestamp
+const userLastPing = new Map();
+
+// Periodic checker to sweep users that haven't pinged in over 35 seconds
+setInterval(async () => {
+  const now = Date.now();
+  for (const [userId, lastPing] of userLastPing.entries()) {
+    if (now - lastPing > 35000) {
+      userLastPing.delete(userId);
+      const sockets = onlineUsers.get(userId);
+      if (sockets) {
+        onlineUsers.delete(userId);
+      }
+      console.log(`[PING] User ${userId} ping timeout. Marking offline in DB.`);
+      try {
+        await prisma.user.update({
+          where: { id: userId },
+          data: { isOnline: false }
+        });
+        broadcastStatusUpdate(userId, "offline");
+      } catch (err) {
+        console.error(`[PING] Failed to update offline status for user ${userId}:`, err);
+      }
+    }
+  }
+}, 20000);
 
 io.on("connection", (socket) => {
   console.log(`Socket connected: ${socket.id}`);
+
+  // Handle client ping/heartbeat
+  socket.on("ping-user", async (userId) => {
+    if (!userId) return;
+    userLastPing.set(userId, Date.now());
+
+    // Update in-memory registry if socket isn't registered
+    socketToUser.set(socket.id, userId);
+    if (!onlineUsers.has(userId)) {
+      onlineUsers.set(userId, new Set());
+    }
+    onlineUsers.get(userId).add(socket.id);
+
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { isOnline: true }
+      });
+      if (user && !user.isOnline) {
+        await prisma.user.update({
+          where: { id: userId },
+          data: { isOnline: true }
+        });
+        console.log(`[PING] Auto-healed online status for user ${userId}`);
+        broadcastStatusUpdate(userId, "online");
+      }
+    } catch (err) {
+      console.error("[PING] Error auto-healing status:", err);
+    }
+  });
 
   // User logs in / goes online
   socket.on("user-online", (userId) => {
