@@ -188,6 +188,8 @@ const onlineUsers = new Map();
 const socketToUser = new Map();
 // Map of userId -> last ping timestamp
 const userLastPing = new Map();
+// Map of gameId -> Set of userIds currently in the game room
+const gameRoomUsers = new Map();
 
 // Periodic checker to sweep users that haven't pinged in over 35 seconds
 setInterval(async () => {
@@ -297,6 +299,12 @@ io.on("connection", (socket) => {
     }
     onlineUsers.get(userId).add(socket.id);
 
+    // Track room users
+    if (!gameRoomUsers.has(gameId)) {
+      gameRoomUsers.set(gameId, new Set());
+    }
+    gameRoomUsers.get(gameId).add(userId);
+
     // Update database status to online
     prisma.user.update({
       where: { id: userId },
@@ -309,6 +317,74 @@ io.on("connection", (socket) => {
 
     // Send a message indicating user joined
     io.to(roomName).emit("user-joined-room", { userId });
+
+    // Notify opponent
+    try {
+      const game = await prisma.game.findUnique({
+        where: { id: gameId },
+        select: {
+          player1Id: true,
+          player2Id: true,
+          mode: true,
+          player1: { select: { name: true, email: true } },
+          player2: { select: { name: true, email: true } }
+        }
+      });
+      if (game) {
+        const opponentId = game.player1Id === userId ? game.player2Id : game.player1Id;
+        const sender = game.player1Id === userId ? game.player1 : game.player2;
+        const senderName = sender.name || sender.email.split("@")[0] || "Someone";
+        
+        const opponentOnline = onlineUsers.has(opponentId) && onlineUsers.get(opponentId).size > 0;
+        if (opponentOnline) {
+          onlineUsers.get(opponentId).forEach((socketId) => {
+            io.to(socketId).emit("opponent-waiting-status-changed", {
+              gameId,
+              opponentId: userId,
+              opponentName: senderName,
+              mode: game.mode,
+              isWaiting: true
+            });
+          });
+          console.log(`Direct waiting event sent to online user ${opponentId} for game ${gameId}`);
+        } else {
+          const modeText = game.mode === "MEMORY" ? "Memory Match 🧩" : (game.mode === "TICTACTOE" ? "Tic Tac Toe ❌⭕" : "Grid Battleship 🎯");
+          await sendPushNotification({
+            externalId: opponentId,
+            playerId: null,
+            title: "Match is Active! 🎮",
+            message: `${senderName} is waiting for you in ${modeText}! Join now to play.`,
+            url: `/game/${gameId}`
+          });
+          console.log(`OneSignal push queued for offline opponent ${opponentId} for game ${gameId}`);
+        }
+      }
+    } catch (dbErr) {
+      console.error("Error sending waiting updates:", dbErr);
+    }
+  });
+
+  // Leaving a game room
+  socket.on("leave-game", async ({ gameId, userId }) => {
+    if (!gameId || !userId) return;
+    await removeUserFromGameRoom(gameId, userId);
+    socket.leave(`game:${gameId}`);
+    if (socket.gameId === gameId) {
+      socket.gameId = null;
+    }
+  });
+
+  // Querying waiting opponents inside specific games
+  socket.on("get-waiting-opponents", (gameIds, callback) => {
+    if (!Array.isArray(gameIds) || typeof callback !== "function") return;
+    const waiting = {};
+    gameIds.forEach((gid) => {
+      const users = gameRoomUsers.get(gid);
+      if (users && users.size > 0) {
+        waiting[gid] = Array.from(users);
+      }
+    });
+    callback(waiting);
   });
 
   // Submitting 5-block selection (0-63 grid)
@@ -866,10 +942,47 @@ io.on("connection", (socket) => {
     if (gameId && userId) {
       const roomName = `game:${gameId}`;
       io.to(roomName).emit("opponent-disconnected-event", { userId });
+      removeUserFromGameRoom(gameId, userId);
       console.log(`User ${userId} disconnected from game ${gameId}. Keep-alive active.`);
     }
   });
 });
+
+// Helper to remove user from in-memory game room tracking and notify opponent
+async function removeUserFromGameRoom(gameId, userId) {
+  if (!gameId || !userId) return;
+  const roomUsers = gameRoomUsers.get(gameId);
+  if (roomUsers) {
+    roomUsers.delete(userId);
+    if (roomUsers.size === 0) {
+      gameRoomUsers.delete(gameId);
+    }
+  }
+
+  // Find opponent to notify
+  try {
+    const game = await prisma.game.findUnique({
+      where: { id: gameId },
+      select: { player1Id: true, player2Id: true }
+    });
+    if (game) {
+      const opponentId = game.player1Id === userId ? game.player2Id : game.player1Id;
+      const opponentOnline = onlineUsers.has(opponentId) && onlineUsers.get(opponentId).size > 0;
+      if (opponentOnline) {
+        onlineUsers.get(opponentId).forEach((socketId) => {
+          io.to(socketId).emit("opponent-waiting-status-changed", {
+            gameId,
+            opponentId: userId,
+            isWaiting: false
+          });
+        });
+        console.log(`Direct waiting event (offline) sent to user ${opponentId} for game ${gameId}`);
+      }
+    }
+  } catch (err) {
+    console.error("Error broadcasting leave-game status:", err);
+  }
+}
 
 // Helper function to broadcast friend status updates
 function broadcastStatusUpdate(userId, status) {
