@@ -447,6 +447,99 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Tic Tac Toe Move Event
+  socket.on("make-tictactoe-move", async ({ gameId, userId, cellIndex }) => {
+    console.log(`[SOCKET] make-tictactoe-move: gameId=${gameId}, userId=${userId}, cellIndex=${cellIndex}`);
+    if (!gameId || !userId || cellIndex === undefined) return;
+    const roomName = `game:${gameId}`;
+
+    try {
+      const game = await prisma.game.findUnique({ where: { id: gameId } });
+      if (!game || game.status !== "PLAYING") return;
+      if (game.mode !== "TICTACTOE") return;
+      if (game.turn !== userId) {
+        console.log(`[SOCKET] TicTacToe: Not user ${userId}'s turn`);
+        return;
+      }
+
+      // Parse memoryGrid (which holds the 3x3 board)
+      let board = [];
+      if (Array.isArray(game.memoryGrid)) {
+        board = game.memoryGrid;
+      } else {
+        try {
+          board = JSON.parse(game.memoryGrid || "[]");
+        } catch (e) {
+          board = Array(9).fill("");
+        }
+      }
+      if (board.length !== 9) {
+        board = Array(9).fill("");
+      }
+
+      // Verify cell is valid and empty
+      if (cellIndex < 0 || cellIndex >= 9) return;
+      if (board[cellIndex] !== "") return;
+
+      const isPlayer1 = game.player1Id === userId;
+      const symbol = isPlayer1 ? "X" : "O";
+      board[cellIndex] = symbol;
+
+      // Check for win or draw
+      const checkWin = (b, sym) => {
+        const winPatterns = [
+          [0, 1, 2], [3, 4, 5], [6, 7, 8], // Rows
+          [0, 3, 6], [1, 4, 7], [2, 5, 8], // Columns
+          [0, 4, 8], [2, 4, 6]             // Diagonals
+        ];
+        return winPatterns.some(pattern => pattern.every(idx => b[idx] === sym));
+      };
+
+      const hasWon = checkWin(board, symbol);
+      const isDraw = !hasWon && board.every(cell => cell !== "");
+
+      let newStatus = game.status;
+      let winnerId = game.winnerId;
+      let nextTurn = game.turn;
+
+      if (hasWon) {
+        newStatus = "FINISHED";
+        winnerId = userId;
+      } else if (isDraw) {
+        newStatus = "FINISHED";
+        winnerId = null; // Draw
+      } else {
+        nextTurn = isPlayer1 ? game.player2Id : game.player1Id;
+      }
+
+      const updatedGame = await prisma.game.update({
+        where: { id: gameId },
+        data: {
+          memoryGrid: board,
+          status: newStatus,
+          winnerId,
+          turn: nextTurn
+        }
+      });
+
+      // Broadcast update
+      io.to(roomName).emit("tictactoe-move-result", {
+        game: updatedGame,
+        move: {
+          userId,
+          cellIndex,
+          symbol,
+          isWinner: hasWon,
+          isDraw
+        }
+      });
+
+      console.log(`[SOCKET] TicTacToe move by ${userId} on cell ${cellIndex} - Win: ${hasWon}. Draw: ${isDraw}`);
+    } catch (err) {
+      console.error("Error making tictactoe move:", err);
+    }
+  });
+
   // Memory Game card flipping
   socket.on("flip-memory-card", async ({ gameId, userId, cellIndex }) => {
     console.log(`[SOCKET] flip-memory-card event: gameId=${gameId}, userId=${userId}, cellIndex=${cellIndex}`);
