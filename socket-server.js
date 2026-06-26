@@ -674,6 +674,19 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Relaying direct message to recipient if online
+  socket.on("send-direct-message", ({ recipientId, message }) => {
+    if (!recipientId || !message) return;
+    if (onlineUsers.has(recipientId)) {
+      onlineUsers.get(recipientId).forEach((socketId) => {
+        io.to(socketId).emit("direct-message-received", message);
+      });
+      console.log(`Relayed direct message from ${message.senderId} to ${recipientId}`);
+    } else {
+      console.log(`Direct message recipient ${recipientId} is offline. Skipping real-time relay.`);
+    }
+  });
+
   // Handle disconnect
   socket.on("disconnect", () => {
     const userId = socketToUser.get(socket.id) || socket.userId;

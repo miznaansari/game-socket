@@ -27,6 +27,8 @@ model User {
   gamesAsPlayer2      Game[]         @relation("Player2")
   wonGames            Game[]         @relation("Winner")
   chatMessagesSent    ChatMessage[]  @relation("Sender")
+  directMessagesSent     DirectMessage[] @relation("DMSent")
+  directMessagesReceived DirectMessage[] @relation("DMReceived")
 }
 
 model UserSession {
@@ -100,4 +102,21 @@ model Campaign {
   title     String
   message   String
   sentAt    DateTime @default(now())
+}
+
+model DirectMessage {
+  id           String   @id @default(uuid())
+  senderId     String
+  receiverId   String
+  content      String   @db.Text
+  isGameInvite Boolean  @default(false)
+  inviteGameId String?
+  inviteMode   String?
+  createdAt    DateTime @default(now())
+
+  sender       User     @relation("DMSent", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver     User     @relation("DMReceived", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@index([senderId])
+  @@index([receiverId])
 }
