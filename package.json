@@ -1,6 +1,6 @@
 {
   "name": "game-socket",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "Socket.io server for 1v1 Battle Grid game",
   "main": "socket-server.js",
   "scripts": {
