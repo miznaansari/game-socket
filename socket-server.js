@@ -318,6 +318,28 @@ io.on("connection", (socket) => {
     // Send a message indicating user joined
     io.to(roomName).emit("user-joined-room", { userId });
 
+    // Sync latest game state from DB to the re-joining client
+    try {
+      const fullGame = await prisma.game.findUnique({
+        where: { id: gameId },
+        include: {
+          player1: { select: { id: true, name: true, email: true } },
+          player2: { select: { id: true, name: true, email: true } },
+          winner: { select: { id: true, name: true, email: true } },
+        }
+      });
+      if (fullGame) {
+        socket.emit("game-updated", {
+          game: fullGame,
+          event: "sync",
+          userId,
+        });
+        console.log(`Synced game state for user ${userId} in game ${gameId}`);
+      }
+    } catch (err) {
+      console.error("Error syncing game state on join-game:", err);
+    }
+
     // Notify opponent
     try {
       const game = await prisma.game.findUnique({
@@ -880,6 +902,125 @@ io.on("connection", (socket) => {
     } catch (err) {
       console.error("Error saving chat or sending chat push notification:", err);
     }
+  });
+
+  // Word Guess real-time setup progress length broadcast
+  socket.on("word-guess-setup-progress", ({ gameId, userId, lengths }) => {
+    if (!gameId || !userId || !lengths) return;
+    const roomName = `game:${gameId}`;
+    socket.to(roomName).emit("opponent-setup-progress", { userId, lengths });
+  });
+
+  // Word Guess guess submission
+  socket.on("make-word-guess", async ({ gameId, userId, wordIndex, guess }) => {
+    if (!gameId || !userId || wordIndex === undefined || !guess) return;
+    const roomName = `game:${gameId}`;
+
+    try {
+      const game = await prisma.game.findUnique({
+        where: { id: gameId },
+        include: {
+          player1: { select: { id: true, name: true, email: true } },
+          player2: { select: { id: true, name: true, email: true } },
+        }
+      });
+      if (!game || game.status !== "PLAYING") return;
+
+      const isPlayer1 = game.player1Id === userId;
+      const opponentId = isPlayer1 ? game.player2Id : game.player1Id;
+
+      // Parse opponent selections
+      const opponentSelectionsRaw = isPlayer1 ? game.player2Selections : game.player1Selections;
+      const opponentSelections = typeof opponentSelectionsRaw === "string" ? JSON.parse(opponentSelectionsRaw) : opponentSelectionsRaw;
+      if (!opponentSelections || !opponentSelections.words) return;
+
+      const targetWord = opponentSelections.words[wordIndex];
+      if (!targetWord) return;
+
+      // Parse current guesses
+      const myGuessesRaw = isPlayer1 ? game.player1Guesses : game.player2Guesses;
+      const myGuesses = typeof myGuessesRaw === "string" ? JSON.parse(myGuessesRaw) : myGuessesRaw;
+      if (!myGuesses) return;
+
+      const normalizedGuess = guess.trim().toLowerCase();
+      const isCorrect = normalizedGuess === targetWord.toLowerCase();
+
+      let correctList = Array.isArray(myGuesses.correct) ? myGuesses.correct : [];
+      let revealedLetters = Array.isArray(myGuesses.revealedLetters) ? myGuesses.revealedLetters : [];
+
+      if (isCorrect) {
+        if (!correctList.includes(targetWord)) {
+          correctList.push(targetWord);
+        }
+        revealedLetters[wordIndex] = targetWord.length;
+      } else {
+        // Increment revealed letter count, cap at word length - 1 (leave at least last letter secret)
+        const currentRevealed = revealedLetters[wordIndex] || 1;
+        if (currentRevealed < targetWord.length - 1) {
+          revealedLetters[wordIndex] = currentRevealed + 1;
+        }
+      }
+
+      // Check win condition
+      const hasWon = correctList.length === opponentSelections.words.length;
+      let newStatus = game.status;
+      let winnerId = game.winnerId;
+
+      if (hasWon) {
+        newStatus = "FINISHED";
+        winnerId = userId;
+      }
+
+      const updatedGuesses = {
+        correct: correctList,
+        revealedLetters
+      };
+
+      let updateData = {
+        status: newStatus,
+        winnerId
+      };
+
+      if (isPlayer1) {
+        updateData.player1Guesses = updatedGuesses;
+      } else {
+        updateData.player2Guesses = updatedGuesses;
+      }
+
+      const updatedGame = await prisma.game.update({
+        where: { id: gameId },
+        data: updateData,
+        include: {
+          player1: { select: { id: true, name: true, email: true } },
+          player2: { select: { id: true, name: true, email: true } },
+          winner: { select: { id: true, name: true, email: true } },
+        }
+      });
+
+      // Emit results to the game room
+      io.to(roomName).emit("word-guess-result", {
+        game: updatedGame,
+        result: {
+          userId,
+          wordIndex,
+          isCorrect,
+          guess,
+          revealedLetters,
+          isWinner: hasWon
+        }
+      });
+
+      console.log(`Word guess by ${userId} on index ${wordIndex}: guess='${guess}' (correct='${targetWord}') -> isCorrect=${isCorrect}, win=${hasWon}`);
+    } catch (err) {
+      console.error("Error processing word guess:", err);
+    }
+  });
+
+  // Notifies the opponent that this user completed their setup
+  socket.on("submit-word-guess-setup", ({ gameId, userId }) => {
+    if (!gameId || !userId) return;
+    const roomName = `game:${gameId}`;
+    socket.to(roomName).emit("opponent-setup-submitted", { userId });
   });
 
   // Live 1v1 invite notification (if opponent is online)
