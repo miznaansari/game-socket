@@ -976,9 +976,15 @@ io.on("connection", (socket) => {
         revealedLetters
       };
 
+      let nextTurn = game.turn;
+      if (!isCorrect) {
+        nextTurn = opponentId;
+      }
+
       let updateData = {
         status: newStatus,
-        winnerId
+        winnerId,
+        turn: nextTurn
       };
 
       if (isPlayer1) {
