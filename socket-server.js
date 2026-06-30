@@ -1016,11 +1016,80 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Notifies the opponent that this user completed their setup
-  socket.on("submit-word-guess-setup", ({ gameId, userId }) => {
+  // Notifies the opponent that this user completed their setup and sends the full game state
+  socket.on("submit-word-guess-setup", async ({ gameId, userId }) => {
     if (!gameId || !userId) return;
     const roomName = `game:${gameId}`;
     socket.to(roomName).emit("opponent-setup-submitted", { userId });
+
+    try {
+      const fullGame = await prisma.game.findUnique({
+        where: { id: gameId },
+        include: {
+          player1: { select: { id: true, name: true, email: true } },
+          player2: { select: { id: true, name: true, email: true } },
+          winner: { select: { id: true, name: true, email: true } },
+        }
+      });
+      if (fullGame) {
+        io.to(roomName).emit("game-updated", {
+          game: fullGame,
+          event: "setup-submitted",
+          userId,
+        });
+      }
+    } catch (err) {
+      console.error("Error broadcasting setup-submitted game update:", err);
+    }
+  });
+
+  // Starts the Word Guess game after both players have submitted their word lists
+  socket.on("start-word-guess-game", async ({ gameId }) => {
+    if (!gameId) return;
+    const roomName = `game:${gameId}`;
+    try {
+      const game = await prisma.game.findUnique({ where: { id: gameId } });
+      if (!game || game.status !== "SELECTING") return;
+
+      // Ensure both selections are set
+      if (!game.player1Selections || !game.player2Selections) return;
+
+      let wordCount = 5;
+      try {
+        const grid = typeof game.memoryGrid === 'string' ? JSON.parse(game.memoryGrid) : game.memoryGrid;
+        if (grid && grid.wordCount) {
+          wordCount = grid.wordCount;
+        }
+      } catch (e) {}
+
+      const updatedGame = await prisma.game.update({
+        where: { id: gameId },
+        data: {
+          status: "PLAYING",
+          player1Guesses: {
+            correct: [],
+            revealedLetters: Array(wordCount).fill(1)
+          },
+          player2Guesses: {
+            correct: [],
+            revealedLetters: Array(wordCount).fill(1)
+          }
+        },
+        include: {
+          player1: { select: { id: true, name: true, email: true } },
+          player2: { select: { id: true, name: true, email: true } },
+          winner: { select: { id: true, name: true, email: true } },
+        }
+      });
+
+      io.to(roomName).emit("game-updated", {
+        game: updatedGame,
+        event: "start-game",
+      });
+      console.log(`Word guess game ${gameId} started!`);
+    } catch (err) {
+      console.error("Error starting word guess game:", err);
+    }
   });
 
   // Live 1v1 invite notification (if opponent is online)
