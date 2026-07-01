@@ -638,6 +638,132 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Dots & Boxes Game move handler
+  socket.on("make-dots-move", async ({ gameId, userId, lineKey }) => {
+    console.log(`[SOCKET] make-dots-move: gameId=${gameId}, userId=${userId}, lineKey=${lineKey}`);
+    if (!gameId || !userId || !lineKey) return;
+    const roomName = `game:${gameId}`;
+
+    try {
+      const game = await prisma.game.findUnique({ where: { id: gameId } });
+      if (!game || game.status !== "PLAYING") return;
+      if (game.mode !== "DOTS") return;
+      if (game.turn !== userId) {
+        console.log(`[SOCKET] Dots: Not user ${userId}'s turn`);
+        return;
+      }
+
+      // Parse memoryGrid (which holds lines and boxes states)
+      let board = { rows: 4, cols: 4, lines: {}, boxes: {} };
+      if (game.memoryGrid) {
+        if (typeof game.memoryGrid === "object" && !Array.isArray(game.memoryGrid)) {
+          board = game.memoryGrid;
+        } else {
+          try {
+            board = JSON.parse(game.memoryGrid);
+          } catch (e) {
+            board = { rows: 4, cols: 4, lines: {}, boxes: {} };
+          }
+        }
+      }
+
+      board.lines = board.lines || {};
+      board.boxes = board.boxes || {};
+      const rows = parseInt(board.rows) || 4;
+      const cols = parseInt(board.cols) || 4;
+
+      // Check if line is already claimed
+      if (board.lines[lineKey]) {
+        console.log(`[SOCKET] Dots: Line ${lineKey} already claimed`);
+        return;
+      }
+
+      // Claim the line
+      board.lines[lineKey] = userId;
+
+      // Track box completions in this turn
+      let completedBoxesCount = 0;
+      let player1Score = game.player1Score || 0;
+      let player2Score = game.player2Score || 0;
+      const isPlayer1 = game.player1Id === userId;
+
+      // Check box completions: a box (r,c) is bounded by H-r-c, H-(r+1)-c, V-r-c, V-r-(c+1)
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const boxKey = `${r}-${c}`;
+          if (board.boxes[boxKey]) continue; // Already claimed
+
+          const topClaimed = !!board.lines[`H-${r}-${c}`];
+          const bottomClaimed = !!board.lines[`H-${r+1}-${c}`];
+          const leftClaimed = !!board.lines[`V-${r}-${c}`];
+          const rightClaimed = !!board.lines[`V-${r}-${c+1}`];
+
+          if (topClaimed && bottomClaimed && leftClaimed && rightClaimed) {
+            board.boxes[boxKey] = userId;
+            completedBoxesCount++;
+            if (isPlayer1) {
+              player1Score++;
+            } else {
+              player2Score++;
+            }
+          }
+        }
+      }
+
+      // Decide turn and game status
+      let nextTurn = game.turn;
+      let newStatus = game.status;
+      let winnerId = game.winnerId;
+
+      const totalBoxes = rows * cols;
+      const claimedBoxes = Object.keys(board.boxes).length;
+
+      if (claimedBoxes === totalBoxes) {
+        newStatus = "FINISHED";
+        if (player1Score > player2Score) {
+          winnerId = game.player1Id;
+        } else if (player2Score > player1Score) {
+          winnerId = game.player2Id;
+        } else {
+          winnerId = null; // Draw
+        }
+      } else {
+        // If completed at least one box, active player keeps turn. Otherwise switch turn.
+        if (completedBoxesCount === 0) {
+          nextTurn = isPlayer1 ? game.player2Id : game.player1Id;
+        }
+      }
+
+      const updatedGame = await prisma.game.update({
+        where: { id: gameId },
+        data: {
+          memoryGrid: board,
+          player1Score,
+          player2Score,
+          status: newStatus,
+          winnerId,
+          turn: nextTurn
+        }
+      });
+
+      // Broadcast move result
+      io.to(roomName).emit("dots-move-result", {
+        game: updatedGame,
+        move: {
+          userId,
+          lineKey,
+          completedBoxesCount,
+          isWinner: newStatus === "FINISHED" && winnerId === userId,
+          isDraw: newStatus === "FINISHED" && winnerId === null
+        }
+      });
+
+      console.log(`[SOCKET] Dots move by ${userId} on line ${lineKey} - Completed boxes: ${completedBoxesCount}. Game Over: ${newStatus === "FINISHED"}`);
+    } catch (err) {
+      console.error("Error making dots move:", err);
+    }
+  });
+
   // Memory Game card flipping
   socket.on("flip-memory-card", async ({ gameId, userId, cellIndex }) => {
     console.log(`[SOCKET] flip-memory-card event: gameId=${gameId}, userId=${userId}, cellIndex=${cellIndex}`);
